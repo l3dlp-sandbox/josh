@@ -2,6 +2,10 @@
 #[macro_use]
 extern crate lazy_static;
 
+use josh_proxy::RepoUpdate;
+use opentelemetry::global;
+use opentelemetry::sdk::propagation::TraceContextPropagator;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::Layer;
 
 use futures::future;
@@ -223,12 +227,20 @@ async fn repo_update_fn(
     let body = hyper::body::to_bytes(req.into_body()).await;
 
     let s = tracing::span!(tracing::Level::TRACE, "repo update worker");
+
     let result = tokio::task::spawn_blocking(move || {
         let _e = s.enter();
         let body = body?;
         let buffer = std::str::from_utf8(&body)?;
-        josh_proxy::process_repo_update(serde_json::from_str(buffer)?)
+        let repo_update: RepoUpdate = serde_json::from_str(buffer)?;
+        let context_propagator = repo_update.context_propagator.clone();
+        let parent_context =
+            global::get_text_map_propagator(|propagator| propagator.extract(&context_propagator));
+        s.set_parent(parent_context);
+
+        josh_proxy::process_repo_update(repo_update)
     })
+    .instrument(Span::current())
     .await?;
 
     Ok(match result {
@@ -615,6 +627,15 @@ async fn call_service(
         }
     }
 
+    let span = tracing::span!(tracing::Level::TRACE, "hyper_cgi");
+    let _enter = span.enter();
+    let mut context_propagator = HashMap::<String, String>::default();
+    let context = span.context();
+    global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(&context, &mut context_propagator);
+    });
+    tracing::warn!("debug propagator: {:?}", context_propagator);
+
     let repo_update = josh_proxy::RepoUpdate {
         refs: HashMap::new(),
         remote_url: remote_url.clone(),
@@ -624,6 +645,7 @@ async fn call_service(
         base_ns: josh::to_ns(&parsed_url.upstream_repo),
         git_ns: temp_ns.name().to_string(),
         git_dir: repo_path.to_string(),
+        context_propagator: context_propagator,
     };
 
     let mut cmd = Command::new("git");
@@ -636,10 +658,8 @@ async fn call_service(
     cmd.env("JOSH_REPO_UPDATE", serde_json::to_string(&repo_update)?);
     cmd.env("PATH_INFO", parsed_url.pathinfo.clone());
 
-    let cgires = hyper_cgi::do_cgi(req, cmd)
-        .instrument(tracing::span!(tracing::Level::TRACE, "git http-backend"))
-        .await
-        .0;
+    let git_span = tracing::span!(tracing::Level::TRACE, "git http backend");
+    let cgires = hyper_cgi::do_cgi(req, cmd).instrument(git_span).await.0;
 
     // This is chained as a seperate future to make sure that
     // it is executed in all cases.
@@ -966,6 +986,10 @@ fn main() {
             std::process::exit(pre_receive_hook().unwrap_or(1));
         }
     }
+
+    // Set format for propagating tracing context. This allows to link traces from one invocation
+    // of josh to the next
+    global::set_text_map_propagator(TraceContextPropagator::new());
 
     let fmt_layer = tracing_subscriber::fmt::layer().compact().with_ansi(false);
 
