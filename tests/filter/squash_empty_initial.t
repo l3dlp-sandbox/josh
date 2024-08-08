@@ -45,10 +45,11 @@
 
   $ git tag -a tag_a -m "created a tag" 882f2656a5075936eb37bfefde740e0b453e4479
   $ josh-filter -s --squash-pattern "refs/tags/*" :author=\"New\ Author\"\;\"new@e.mail\" --update refs/heads/filtered
+  [1] :"refs/tags/tag_a"
   [1] :author="New Author";"new@e.mail"
   [1] :squash(
       882f2656a5075936eb37bfefde740e0b453e4479:"refs/tags/tag_a"
   )
 
   $ git log --graph --decorate --pretty=oneline refs/heads/filtered
-  * d8aa5a9937f4f0bd645dbc0b591bae5cd6b6d91b (tag: filtered/tag_a, filtered) refs/tags/tag_a
+  * 977cc3ee14c0d6163ba63bd96f4aeedd43916ba7 (tag: filtered/tag_a, filtered) refs/tags/tag_a
